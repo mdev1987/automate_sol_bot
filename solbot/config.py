@@ -40,6 +40,7 @@ class ScannerThresholds:
     min_buy_sell_ratio: float = 1.3      # more buyers than sellers -> momentum
     min_volume_5m: float = 500           # $500 of volume in the last 5 minutes
     max_market_cap: float = 10_000_000   # deep caps are usually late entries
+    min_score: float = 50.0              # below this, ignore the buy signal
 
 
 @dataclass(frozen=True)
