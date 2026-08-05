@@ -217,3 +217,22 @@ class TelegramNotifier:
             f"{SEP} Balance `${self._f(balance_usdc)}` USDC\n"
             f"{exits}"
         )
+
+    async def send_stopped(
+        self,
+        runtime_s: float,
+        trades: int,
+        win_rate: float,
+        pnl_usdc: float,
+        balance_usdc: float,
+        exit_counts: dict,
+    ) -> None:
+        """Shutdown card; same stats as :meth:`send_status`."""
+        minutes = runtime_s / 60
+        s = self._sign(pnl_usdc)
+        await self._send(
+            f"{ICONS['stop']} **Bot Stopped**\n"
+            f"{SEP} Runtime `{minutes:.0f}m` {SEP} Trades `{trades}`\n"
+            f"{SEP} WinRate `{win_rate:.1f}%` {SEP} PnL `{s}${self._f(pnl_usdc)}`\n"
+            f"{SEP} Balance `${self._f(balance_usdc)}` USDC"
+        )

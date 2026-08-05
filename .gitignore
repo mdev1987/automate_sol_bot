@@ -11,3 +11,6 @@ wheels/
 .env
 docs
 .vscode
+journal.json
+trade_log.csv
+bot.log

@@ -109,12 +109,16 @@ class Trader:
         jup_price: JupiterPrice,
         jupiter: JupiterSwap,
         reporter: TelegramNotifier,
+        on_trade_closed: Optional[object] = None,
     ) -> None:
         self._settings = settings
         self._dex = dex
         self._jup_price = jup_price
         self._jupiter = jupiter
         self._reporter = reporter
+        # Optional object exposing ``async record_trade(position)`` — used by
+        # the monitoring journal. Kept loosely typed to avoid an import cycle.
+        self._journal = on_trade_closed
         self._risk = settings.risk
         self._exit_cfg = settings.exit
 
@@ -319,6 +323,8 @@ class Trader:
         self._settle(position)
         log.info("%s %s pnl=%+.4f roi=%+.1f%%", reason.upper(), position.symbol,
                  position.pnl_usd, position.roi_pct)
+        if self._journal is not None:
+            await self._journal.record_trade(position)
         await self._reporter.send_sell(
             position.mint, position.symbol, reason,
             position.pnl_usd, position.roi_pct,
@@ -326,6 +332,26 @@ class Trader:
             position.hold_seconds, self.balance_usd, position.risk,
         )
         self.position = None
+
+    def restore_state(self, state) -> None:
+        """Resume bankroll & stats from a previously saved journal snapshot."""
+        if not state:
+            return
+        try:
+            self.play_amount = float(state.get("play_amount", self.play_amount))
+            self.saved_amount = float(state.get("saved_amount", self.saved_amount))
+            stats = state.get("stats") or {}
+            self.stats.trades = int(stats.get("trades", self.stats.trades))
+            self.stats.wins = int(stats.get("wins", self.stats.wins))
+            self.stats.losses = int(stats.get("losses", self.stats.losses))
+            self.stats.total_pnl_usd = float(stats.get("total_pnl_usd", self.stats.total_pnl_usd))
+            self.stats.exit_counts = dict(stats.get("exit_counts") or {})
+            self._consec_losses = int(state.get("consec_losses", 0))
+            self._paused_until = float(state.get("paused_until", 0.0))
+            log.info("restored state: play=%.4f saved=%.4f trades=%d",
+                     self.play_amount, self.saved_amount, self.stats.trades)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("partial state restore: %s", exc)
 
     # ------------------------------------------------------------------ lifecycle
     def summary(self) -> dict:

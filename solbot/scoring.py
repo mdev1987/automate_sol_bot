@@ -8,7 +8,7 @@ activity. Components (all derived from the DexScreener pair + launch event):
 - **Volume**   (0-20)      — logarithmic; $100k of 5m volume = max.
 - **Buy pressure** (0-25)  — buy/sell ratio, saturated at 5x.
 - **Fair launch** (0-15)   — the less SOL the creator bought, the higher.
-- **Liquidity** (0-15)     — best inside the healthy $5k-$30k band.
+- **Liquidity** (0-15)     — best inside the healthy $5k-$50k band.
 
 The scanner uses this score to rank/surface signals; the trader only enters
 when the score clears a configured cutoff.
@@ -31,7 +31,7 @@ VOLUME_FULL_USD = 100_000
 
 # Liquidity band considered healthy for a new launch.
 LIQ_MIN_USD = 5_000
-LIQ_MAX_USD = 30_000
+LIQ_MAX_USD = 50_000
 
 
 @dataclass(frozen=True)
