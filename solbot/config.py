@@ -158,6 +158,9 @@ def load_settings() -> Settings:
         pumpdev_wss=getenv("PUMPDEV_WSS", "wss://pumpdev.io/ws"),
         starting_amount_usdc=Decimal(getenv("STARTING_AMOUNT_USDC", "2.00")),
         slippage_bps=int(getenv("SLIPPAGE_BPS", "150")),
+        exit=ExitConfig(
+            poll_interval_sec=float(getenv("POLL_INTERVAL_SEC", "8.0")),
+        ),
         dry_run=_env_bool("DRY_RUN", True),
         bot_token=getenv("BOT_TOKEN"),
         chat_id=getenv("CHAT_ID"),
