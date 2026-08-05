@@ -20,6 +20,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "base58" },
+    { name = "httpx" },
     { name = "orjson" },
     { name = "python-dotenv" },
     { name = "python-telegram-bot" },
@@ -32,6 +33,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "base58", specifier = ">=2.1.1" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "orjson", specifier = ">=3.11.9" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "python-telegram-bot", specifier = ">=22.8" },
