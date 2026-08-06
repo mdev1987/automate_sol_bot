@@ -165,13 +165,9 @@ class JupiterSwap:
                 return result
             last = result
             log.warning("sell execute @%dbps failed: %s", slippage, result.error)
-            if self._is_liquidity_error(result.error) and slippage < 1000:
-                continue
-            break
+            # Keep climbing the ladder on any failure — a wider slippage bound
+            # can still land on a thin book, and a failed exit is worse than
+            # a slightly worse fill. Only the final rung stops.
+            if slippage >= 1000:
+                break
         return last or SwapResult(False, "", amount_raw, 0, "sell failed")
-
-    @staticmethod
-    def _is_liquidity_error(error: str) -> bool:
-        """Heuristic: does the error suggest a thin market worth re-trying?"""
-        lowered = error.lower()
-        return any(k in lowered for k in ("insufficient", "liquidity", "slippage", "limit"))

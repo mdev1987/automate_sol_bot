@@ -7,6 +7,9 @@ trading plan.
 
 **Risk rules**
 
+- **Bankroll** — the stake is *reserved* at entry (``play_amount`` -> 0); on
+  close the proceeds flow back: wins split by the compounding ratio, losses
+  return the remainder (so a loss actually reduces the bankroll).
 - **Play floor** — if the per-trade amount drops below the floor, reset to
   the starting amount (avoids a death spiral).
 - **Loss pause** — after N consecutive losses we cool down for a while
@@ -145,15 +148,15 @@ class Trader:
 
     def is_paused(self, now: Optional[float] = None) -> bool:
         """True while the loss-pause cooldown is active."""
-        return time.monotonic() if now is None else now < self._paused_until
+        now = time.monotonic() if now is None else now
+        return now < self._paused_until
 
     # -------------------------------------------------------------------- risk gate
     def _can_trade(self) -> bool:
-        now = time.monotonic()
         if self.in_position:
             return False
-        if now < self._paused_until:
-            log.info("risk gate: paused for %.0fs", self._paused_until - now)
+        if self.is_paused():
+            log.info("risk gate: paused for %.0fs", self._paused_until - time.monotonic())
             return False
         if self.play_amount < self._risk.play_floor_usd:
             log.warning("play floor hit: resetting %s -> %s",
@@ -170,13 +173,20 @@ class Trader:
         log.info("compounded: play=%.4f saved=%.4f", self.play_amount, self.saved_amount)
 
     def _settle(self, position: Position) -> None:
-        """Record a closed position into stats and risk counters."""
+        """Record a closed position into stats, risk counters, and bankroll.
+
+        The stake was reserved at entry (``play_amount`` -> 0), so closing a
+        position must hand the proceeds back to the bankroll. Wins are split
+        by the compounding ratio; losses return the remaining proceeds and
+        therefore *reduce* the bankroll by the lost amount.
+        """
         self.stats.record(position)
         if position.pnl_usd >= 0:
             self._consec_losses = 0
             self._apply_compounding(position)
         else:
             self._consec_losses += 1
+            self.play_amount = position.exit_amount_usd
             if self._consec_losses >= self._risk.max_consec_losses:
                 self._paused_until = time.monotonic() + self._risk.pause_seconds
                 log.warning("loss pause: %d losses in a row, pausing %ds",
@@ -238,6 +248,7 @@ class Trader:
                 token_qty=amount / entry_price,
                 signature="paper",
             )
+            self.play_amount = 0.0  # stake reserved into the position
             log.info("PAPER BUY %s @ $%.8f for $%.4f", signal.symbol, entry_price, amount)
             await self._reporter.send_buy(
                 signal.mint, signal.symbol, signal.score.total, entry_price,
@@ -265,6 +276,7 @@ class Trader:
             token_raw_amount=result.output_amount,
             signature=result.signature,
         )
+        self.play_amount = 0.0  # stake reserved into the position
         log.info("LIVE BUY %s sig=%s", signal.symbol, result.signature)
         await self._reporter.send_buy(
             signal.mint, signal.symbol, signal.score.total, entry_price,
