@@ -80,9 +80,11 @@ class Scanner:
             task.add_done_callback(self._on_done)
 
     def _on_done(self, task: "asyncio.Task") -> None:
-        """Surface unexpected errors from an evaluation task."""
+        """Surface unexpected errors from an evaluation task (ignore cancels)."""
         try:
             task.result()
+        except asyncio.CancelledError:
+            pass  # normal during shutdown
         except Exception as exc:  # noqa: BLE001
             log.exception("scanner evaluation failed: %s", exc)
 

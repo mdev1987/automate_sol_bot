@@ -18,7 +18,6 @@ import csv
 import json
 import logging
 import logging.handlers
-import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -51,6 +50,10 @@ def setup_logging(settings: Settings, log_dir: Optional[Path] = None) -> None:
     if root.handlers:  # already configured (tests, re-import)
         return
     root.setLevel(logging.INFO)
+
+    # HTTP client libs log every request at INFO -> drown out bot events.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     console = logging.StreamHandler()
     console.setFormatter(formatter)

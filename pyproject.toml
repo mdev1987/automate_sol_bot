@@ -22,3 +22,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["solbot"]
+
+[dependency-groups]
+dev = [
+    "pyflakes>=3.4.0",
+]

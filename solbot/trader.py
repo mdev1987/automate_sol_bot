@@ -30,7 +30,7 @@ from typing import Optional
 
 from .config import Settings
 from .dex_screener import DexScreener
-from .jupiter import JupiterSwap, SwapResult
+from .jupiter import JupiterSwap
 from .prices import JupiterPrice
 from .reporter import TelegramNotifier
 from .scanner import Signal

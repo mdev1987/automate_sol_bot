@@ -21,7 +21,7 @@ import asyncio
 import logging
 import signal
 import sys
-from typing import Awaitable, Callable, Coroutine
+from typing import Callable
 
 from solbot.config import load_settings
 from solbot.data_stream import PumpDevStream
@@ -64,7 +64,7 @@ class Bot:
         self.signals_q: asyncio.Queue = asyncio.Queue()
 
         self._tasks: dict[str, asyncio.Task] = {}
-        self._shutdown = asyncio.Event()
+        self._shutdown_event = asyncio.Event()
 
     # ------------------------------------------------------------------ tasks
     def _factories(self) -> dict[str, Callable[[], asyncio.Task]]:
@@ -84,15 +84,22 @@ class Bot:
         log.info("startup complete: %s", self.settings.display())
 
     # -------------------------------------------------------------- supervisor
+    def _task_name(self, task: asyncio.Task) -> str:
+        """Map a task back to its pipeline name."""
+        for name, t in self._tasks.items():
+            if t is task:
+                return name
+        return "unknown"
+
     async def _supervise(self) -> None:
         """Watch tasks; recreate any that die unexpectedly."""
-        while not self._shutdown.is_set():
+        while not self._shutdown_event.is_set():
             done, _pending = await asyncio.wait(
                 list(self._tasks.values()), return_when=asyncio.FIRST_COMPLETED
             )
             for task in done:
-                name = next(n for n, t in self._tasks.items() if t is task)
-                if task is self._tasks[name]:
+                name = self._task_name(task)
+                if task is self._tasks.get(name):
                     del self._tasks[name]
                 try:
                     task.result()  # re-raise any unexpected exception
@@ -102,15 +109,25 @@ class Bot:
                     log.exception("task %s crashed: %s", name, exc)
                     await self.reporter.send_alert("Task crashed", f"{name}: {exc}")
                     # Recreate the crashed task so the bot keeps running.
-                    if not self._shutdown.is_set():
+                    if not self._shutdown_event.is_set():
                         log.info("restarting task %s", name)
                         self._tasks[name] = self._factories()[name]()
 
-    # ------------------------------------------------------------- shutdown
+    # -------------------------------------------------------------- shutdown
+    def _request_shutdown(self) -> None:
+        """Signal handler: flag shutdown and cancel the pipeline tasks.
+
+        Cancelling here is essential — the supervisor blocks inside
+        ``asyncio.wait()`` and would never observe a lone flag event.
+        """
+        self._shutdown_event.set()
+        for task in self._tasks.values():
+            task.cancel()
+
     async def _shutdown(self) -> None:
         """Cancel all tasks, close clients, send the stopped card, exit."""
         log.info("shutting down…")
-        self._shutdown.set()
+        self._shutdown_event.set()
         for task in self._tasks.values():
             task.cancel()
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
@@ -129,7 +146,7 @@ class Bot:
         """Full bot lifecycle."""
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
-                asyncio.get_running_loop().add_signal_handler(sig, self._shutdown.set)
+                asyncio.get_running_loop().add_signal_handler(sig, self._request_shutdown)
             except NotImplementedError:
                 pass  # non-UNIX loop
         try:

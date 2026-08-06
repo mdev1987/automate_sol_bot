@@ -15,7 +15,6 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from solders.keypair import Keypair
-from solders.pubkey import Pubkey
 
 log = logging.getLogger(__name__)
 

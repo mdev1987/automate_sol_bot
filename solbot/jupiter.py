@@ -18,7 +18,6 @@ slippage (config, then 300/500/1000 bps) before giving up.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import logging
 from dataclasses import dataclass
