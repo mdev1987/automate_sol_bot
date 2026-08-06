@@ -4,8 +4,9 @@ Keeps the bot observable and self-healing:
 
 - **Logging** — console + rotating ``bot.log``.
 - **Persistence** — every closed trade lands in ``trade_log.csv``; running
-  state (bankroll, stats, risk counters) is snapshotted to ``journal.json``
-  so a restart can resume where the previous run left off.
+  state (bankroll, stats, risk counters, and the *open position* if any) is
+  snapshotted to ``journal.json`` so a restart can resume where the previous
+  run left off.
 - **Health watchdog** — watches the PumpDev stream heartbeat and raises a
   Telegram alert if it goes silent (dead connection the bot can't see).
 - **Periodic summary** — a ``send_status`` card every N minutes.
@@ -124,6 +125,7 @@ class TradeJournal:
             },
             "consec_losses": trader._consec_losses,
             "paused_until": trader._paused_until,
+            "position": trader.position.to_dict() if trader.position else None,
         }
         try:
             tmp = self._journal_file.with_suffix(".tmp")

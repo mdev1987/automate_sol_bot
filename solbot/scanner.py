@@ -38,6 +38,9 @@ MAX_CONCURRENT_EVALUATIONS = 5
 # before it is even evaluated (keeps the queue free of zombies).
 _MAX_STALE_HANDLE = 2.0
 
+# How often the scanner self-reports its funnel counters (seconds).
+FUNNEL_REPORT_SEC = 300.0
+
 @dataclass(frozen=True)
 class Signal:
     """A qualified, scored candidate that a trader may act on."""
@@ -61,6 +64,22 @@ class Scanner:
         self._dex = dex
         self._sem = asyncio.Semaphore(MAX_CONCURRENT_EVALUATIONS)
         self._out_queue: Optional["asyncio.Queue[Signal]"] = None
+        # Funnel counters: where candidates go before becoming a signal.
+        self._stats = {"events": 0, "stale": 0, "no_pair": 0,
+                       "filtered": 0, "rug_blocked": 0, "signals": 0}
+        self._next_report = time.monotonic() + FUNNEL_REPORT_SEC
+
+    def _bump(self, key: str) -> None:
+        self._stats[key] = self._stats.get(key, 0) + 1
+
+    def counters_summary(self) -> str:
+        """One-line funnel summary (events -> ... -> signals)."""
+        s = self._stats
+        return (
+            f"funnel events={s['events']} stale={s['stale']} "
+            f"no_pair={s['no_pair']} filtered={s['filtered']} "
+            f"rug_blocked={s['rug_blocked']} signals={s['signals']}"
+        )
 
     # ------------------------------------------------------------------ run
     async def run(self, in_queue: "asyncio.Queue[dict]", out_queue: "asyncio.Queue[Signal]") -> None:
@@ -71,13 +90,19 @@ class Scanner:
             event = await in_queue.get()
             if event.get("txType") != "create":
                 continue
+            self._bump("events")
             created_ms = event.get("timestamp") or time.time() * 1000
             age = time.time() - created_ms / 1000
             if age > self._thresholds.max_age_seconds * _MAX_STALE_HANDLE:
+                self._bump("stale")
                 log.debug("dropping stale create for %s", event.get("mint"))
                 continue
             task = asyncio.create_task(self._evaluate(event))
             task.add_done_callback(self._on_done)
+
+            if time.monotonic() >= self._next_report:
+                self._next_report += FUNNEL_REPORT_SEC
+                log.info("%s", self.counters_summary())
 
     def _on_done(self, task: "asyncio.Task") -> None:
         """Surface unexpected errors from an evaluation task (ignore cancels)."""
@@ -95,8 +120,10 @@ class Scanner:
             since = time.monotonic()
             pair = await self._wait_for_pair(create.get("mint", ""))
             if pair is None:
-                log.debug("no pair for %s (waited %.0fs)",
-                          create.get("symbol"), time.monotonic() - since)
+                self._bump("no_pair")
+                log.info("NO_PAIR %s (%s): not indexed in %.0fs",
+                         create.get("symbol"), create.get("mint"),
+                         time.monotonic() - since)
                 return None
             signal = self._qualify(create, pair)
             if signal is not None and self._out_queue is not None:
@@ -123,11 +150,18 @@ class Scanner:
         created_ms = create.get("timestamp") or time.time() * 1000
         age_seconds = time.time() - created_ms / 1000
 
-        if not self._passes_filters(pair, age_seconds):
+        if reason := self._filter_reason(pair, age_seconds):
+            self._bump("filtered")
+            log.info("FILTERED %s (%s): %s liq=$%.0f vol=$%.0f txns=%d "
+                     "buys=%d ratio=%.2f mcap=$%.0f",
+                     symbol, mint, reason, pair.liquidity_usd, pair.volume_m5,
+                     pair.txns_m5, pair.buys_m5, pair.buy_sell_ratio,
+                     pair.market_cap or 0.0)
             return None
 
         rug = check_token(create, pair)
         if rug.verdict == "Rug":
+            self._bump("rug_blocked")
             log.info("rug-blocked %s (%s): %s", symbol, mint, rug.flags)
             return None
 
@@ -139,6 +173,7 @@ class Scanner:
             dev_sol=dev_sol,
             liquidity_usd=pair.liquidity_usd,
         )
+        self._bump("signals")
         log.info("QUALIFIED %s (%s) score=%.1f", symbol, mint, s.total)
         return Signal(
             mint=mint,
@@ -151,16 +186,24 @@ class Scanner:
             create=create,
         )
 
-    def _passes_filters(self, pair: Pair, age_seconds: float) -> bool:
-        """True when the pair clears every market threshold."""
+    def _filter_reason(self, pair: Pair, age_seconds: float) -> Optional[str]:
+        """Name of the first threshold the pair fails, or ``None`` if it passes."""
         t = self._thresholds
         market_cap = pair.market_cap if pair.market_cap is not None else pair.fdv or 0.0
-        return (
-            age_seconds <= t.max_age_seconds
-            and t.min_liquidity_usd <= pair.liquidity_usd <= t.max_liquidity_usd
-            and pair.txns_m5 >= t.min_txns_5m
-            and pair.buys_m5 >= t.min_buys_5m
-            and pair.buy_sell_ratio >= t.min_buy_sell_ratio
-            and pair.volume_m5 >= t.min_volume_5m
-            and market_cap <= t.max_market_cap
-        )
+        if age_seconds > t.max_age_seconds:
+            return "age"
+        if pair.liquidity_usd < t.min_liquidity_usd:
+            return "liquidity_low"
+        if pair.liquidity_usd > t.max_liquidity_usd:
+            return "liquidity_high"
+        if pair.txns_m5 < t.min_txns_5m:
+            return "txns"
+        if pair.buys_m5 < t.min_buys_5m:
+            return "buys"
+        if pair.buy_sell_ratio < t.min_buy_sell_ratio:
+            return "ratio"
+        if pair.volume_m5 < t.min_volume_5m:
+            return "volume"
+        if market_cap > t.max_market_cap:
+            return "mcap"
+        return None

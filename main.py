@@ -81,6 +81,12 @@ class Bot:
             self._tasks[name] = factory()
         await self.reporter.test()
         await self.reporter.send_startup(self.settings.display())
+        if self.trader.in_position:
+            await self.reporter.send_alert(
+                "Resumed position",
+                f"tracking open {self.trader.position.symbol} "
+                f"entry=${self.trader.position.entry_price_usd:.8f}",
+            )
         log.info("startup complete: %s", self.settings.display())
 
     # -------------------------------------------------------------- supervisor
@@ -133,6 +139,7 @@ class Bot:
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
 
         await self.journal.save_state(self.trader)
+        log.info("%s", self.scanner.counters_summary())
         await self.reporter.send_stopped(**self.trader.summary())
 
         for client in (self.dex, self.jup_price, self.jupiter):

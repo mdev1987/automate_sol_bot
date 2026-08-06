@@ -31,6 +31,9 @@ log = logging.getLogger(__name__)
 _MIN_REQUEST_INTERVAL_SEC = 1.1
 _RETRY_ATTEMPTS = 3
 
+# Upper bound for the buy/sell ratio (see ``Pair.buy_sell_ratio``).
+_RATIO_CAP = 10.0
+
 
 @dataclass(frozen=True)
 class Pair:
@@ -57,10 +60,11 @@ class Pair:
 
     @property
     def buy_sell_ratio(self) -> float:
-        """Buy/sell ratio (0.0 when there are no sells)."""
+        """Buy/sell ratio, capped so a zero-sell (or near-zero) launch can't
+        report an inflated, unbounded value that dominates filters/scoring."""
         if self.sells_m5 <= 0:
-            return float(self.buys_m5)
-        return self.buys_m5 / self.sells_m5
+            return float(min(self.buys_m5, _RATIO_CAP))
+        return min(self.buys_m5 / self.sells_m5, _RATIO_CAP)
 
     @property
     def is_dead(self, threshold_usd: float) -> bool:

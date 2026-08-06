@@ -77,6 +77,37 @@ class Position:
     def roi_pct(self) -> float:
         return self.pnl_usd / self.entry_amount_usd * 100 if self.entry_amount_usd else 0.0
 
+    def to_dict(self) -> dict:
+        """Serialize for crash-recovery (see :meth:`Trader.restore_state`)."""
+        return {
+            "mint": self.mint,
+            "symbol": self.symbol,
+            "entry_price_usd": self.entry_price_usd,
+            "entry_amount_usd": self.entry_amount_usd,
+            "entry_time": self.entry_time,
+            "score": self.score,
+            "risk": self.risk,
+            "token_raw_amount": self.token_raw_amount,
+            "token_qty": self.token_qty,
+            "signature": self.signature,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Position":
+        """Rebuild a position from a journal snapshot."""
+        return cls(
+            mint=str(data.get("mint", "")),
+            symbol=str(data.get("symbol", "")),
+            entry_price_usd=float(data.get("entry_price_usd", 0.0)),
+            entry_amount_usd=float(data.get("entry_amount_usd", 0.0)),
+            entry_time=float(data.get("entry_time", 0.0)),
+            score=float(data.get("score", 0.0)),
+            risk=str(data.get("risk", "")),
+            token_raw_amount=int(data.get("token_raw_amount", 0)),
+            token_qty=float(data.get("token_qty", 0.0)),
+            signature=str(data.get("signature", "")),
+        )
+
 
 @dataclass
 class TraderStats:
@@ -147,8 +178,8 @@ class Trader:
         return self.position is not None
 
     def is_paused(self, now: Optional[float] = None) -> bool:
-        """True while the loss-pause cooldown is active."""
-        now = time.monotonic() if now is None else now
+        """True while the loss-pause cooldown is active (wall-clock based)."""
+        now = time.time() if now is None else now
         return now < self._paused_until
 
     # -------------------------------------------------------------------- risk gate
@@ -156,7 +187,7 @@ class Trader:
         if self.in_position:
             return False
         if self.is_paused():
-            log.info("risk gate: paused for %.0fs", self._paused_until - time.monotonic())
+            log.info("risk gate: paused for %.0fs", self._paused_until - time.time())
             return False
         if self.play_amount < self._risk.play_floor_usd:
             log.warning("play floor hit: resetting %s -> %s",
@@ -188,7 +219,7 @@ class Trader:
             self._consec_losses += 1
             self.play_amount = position.exit_amount_usd
             if self._consec_losses >= self._risk.max_consec_losses:
-                self._paused_until = time.monotonic() + self._risk.pause_seconds
+                self._paused_until = time.time() + self._risk.pause_seconds
                 log.warning("loss pause: %d losses in a row, pausing %ds",
                             self._consec_losses, self._risk.pause_seconds)
 
@@ -243,7 +274,7 @@ class Trader:
             self.position = Position(
                 mint=signal.mint, symbol=signal.symbol,
                 entry_price_usd=entry_price, entry_amount_usd=amount,
-                entry_time=time.monotonic(), score=signal.score.total,
+                entry_time=time.time(), score=signal.score.total,
                 risk=signal.rug_verdict,
                 token_qty=amount / entry_price,
                 signature="paper",
@@ -271,7 +302,7 @@ class Trader:
         self.position = Position(
             mint=signal.mint, symbol=signal.symbol,
             entry_price_usd=entry_price, entry_amount_usd=amount,
-            entry_time=time.monotonic(), score=signal.score.total,
+            entry_time=time.time(), score=signal.score.total,
             risk=signal.rug_verdict,
             token_raw_amount=result.output_amount,
             signature=result.signature,
@@ -305,7 +336,7 @@ class Trader:
             stale_reads = 0
 
             ratio = price / position.entry_price_usd if position.entry_price_usd else 0.0
-            hold = time.monotonic() - position.entry_time
+            hold = time.time() - position.entry_time
 
             reason = None
             if ratio >= self._exit_cfg.take_profit_mult:
@@ -342,7 +373,7 @@ class Trader:
                 position.signature = result.signature
 
         position.exit_reason = reason
-        position.hold_seconds = time.monotonic() - position.entry_time
+        position.hold_seconds = time.time() - position.entry_time
         self._settle(position)
         log.info("%s %s pnl=%+.4f roi=%+.1f%%", reason.upper(), position.symbol,
                  position.pnl_usd, position.roi_pct)
@@ -371,8 +402,11 @@ class Trader:
             self.stats.exit_counts = dict(stats.get("exit_counts") or {})
             self._consec_losses = int(state.get("consec_losses", 0))
             self._paused_until = float(state.get("paused_until", 0.0))
-            log.info("restored state: play=%.4f saved=%.4f trades=%d",
-                     self.play_amount, self.saved_amount, self.stats.trades)
+            pos = state.get("position")
+            self.position = Position.from_dict(pos) if pos else None
+            log.info("restored state: play=%.4f saved=%.4f trades=%d position=%s",
+                     self.play_amount, self.saved_amount, self.stats.trades,
+                     self.position.symbol if self.position else "none")
         except Exception as exc:  # noqa: BLE001
             log.warning("partial state restore: %s", exc)
 

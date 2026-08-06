@@ -29,16 +29,20 @@ LAMPORTS_PER_SOL = 1_000_000_000
 
 @dataclass(frozen=True)
 class ScannerThresholds:
-    """Filter thresholds used to decide whether a token qualifies for a buy."""
+    """Filter thresholds used to decide whether a token qualifies for a buy.
 
-    max_age_seconds: int = 5 * 60        # older than 5 minutes => gains are gone
-    min_liquidity_usd: float = 2_000     # reject dust / near-zero pools
-    max_liquidity_usd: float = 500_000   # reject already-huge pools (late entry)
-    min_txns_5m: int = 12                # at least 12 trades in last 5 minutes
-    min_buys_5m: int = 8                 # at least 8 buys (not just sells)
-    min_buy_sell_ratio: float = 1.3      # more buyers than sellers -> momentum
-    min_volume_5m: float = 500           # $500 of volume in the last 5 minutes
-    max_market_cap: float = 10_000_000   # deep caps are usually late entries
+    These gate entry (if any fails, the token is dropped). The score does
+    NOT gate — it only ranks qualified tokens. All are overridable via env.
+    """
+
+    max_age_seconds: int = 10 * 60        # older than 10 min => gains are gone
+    min_liquidity_usd: float = 1_500      # reject dust / near-zero pools
+    max_liquidity_usd: float = 500_000    # reject already-huge pools (late entry)
+    min_txns_5m: int = 6                  # at least 6 trades in last 5 minutes
+    min_buys_5m: int = 4                  # at least 4 buys (not just sells)
+    min_buy_sell_ratio: float = 1.1       # more buyers than sellers -> momentum
+    min_volume_5m: float = 250            # $250 of volume in the last 5 minutes
+    max_market_cap: float = 10_000_000    # deep caps are usually late entries
     # NOTE: no min_score here — the score does NOT gate entry. It is only
     # used to rank qualified tokens and pick the best when several qualify.
 
@@ -102,7 +106,7 @@ class Settings:
     # -- wallet ---------------------------------------------------------------
     @property
     def keypair(self) -> Optional[Keypair]:
-        """Decode the hex-private-key into a Solana :class:`Keypair`."""
+        """Decode the base58 wallet private key into a :class:`Keypair`."""
         key = (self.wallet_key or "").strip()
         if not key:
             return None
@@ -147,6 +151,22 @@ def _env_bool(key: str, default: bool) -> bool:
     return value not in {"0", "false", "no", "off"}
 
 
+def _env_float(key: str, default: float) -> float:
+    """Parse a float env var, falling back to ``default`` when unset/bad."""
+    try:
+        return float(_env(key, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_int(key: str, default: int) -> int:
+    """Parse an int env var, falling back to ``default`` when unset/bad."""
+    try:
+        return int(_env(key, str(default)))
+    except ValueError:
+        return default
+
+
 def load_settings() -> Settings:
     """Build the full :class:`Settings` from the environment."""
     _load_env()
@@ -158,8 +178,31 @@ def load_settings() -> Settings:
         pumpdev_wss=getenv("PUMPDEV_WSS", "wss://pumpdev.io/ws"),
         starting_amount_usdc=Decimal(getenv("STARTING_AMOUNT_USDC", "2.00")),
         slippage_bps=int(getenv("SLIPPAGE_BPS", "150")),
+        scanner=ScannerThresholds(
+            max_age_seconds=_env_int("MAX_AGE_SECONDS", ScannerThresholds.max_age_seconds),
+            min_liquidity_usd=_env_float("MIN_LIQUIDITY_USD", ScannerThresholds.min_liquidity_usd),
+            max_liquidity_usd=_env_float("MAX_LIQUIDITY_USD", ScannerThresholds.max_liquidity_usd),
+            min_txns_5m=_env_int("MIN_TXNS_5M", ScannerThresholds.min_txns_5m),
+            min_buys_5m=_env_int("MIN_BUYS_5M", ScannerThresholds.min_buys_5m),
+            min_buy_sell_ratio=_env_float("MIN_BUY_SELL_RATIO", ScannerThresholds.min_buy_sell_ratio),
+            min_volume_5m=_env_float("MIN_VOLUME_5M", ScannerThresholds.min_volume_5m),
+            max_market_cap=_env_float("MAX_MARKET_CAP", ScannerThresholds.max_market_cap),
+        ),
         exit=ExitConfig(
-            poll_interval_sec=float(getenv("POLL_INTERVAL_SEC", "8.0")),
+            take_profit_mult=_env_float("TAKE_PROFIT_MULT", ExitConfig.take_profit_mult),
+            stop_loss_mult=_env_float("STOP_LOSS_MULT", ExitConfig.stop_loss_mult),
+            dead_pool_liquidity_usd=_env_float("DEAD_POOL_LIQUIDITY_USD", ExitConfig.dead_pool_liquidity_usd),
+            poll_interval_sec=_env_float("POLL_INTERVAL_SEC", ExitConfig.poll_interval_sec),
+            max_hold_seconds=_env_float("MAX_HOLD_SECONDS", ExitConfig.max_hold_seconds),
+        ),
+        risk=RiskConfig(
+            play_floor_usd=_env_float("PLAY_FLOOR_USD", RiskConfig.play_floor_usd),
+            max_consec_losses=_env_int("MAX_CONSEC_LOSSES", RiskConfig.max_consec_losses),
+            pause_seconds=_env_int("LOSS_PAUSE_SEC", RiskConfig.pause_seconds),
+            dead_pool_check_seconds=_env_int("DEAD_POOL_CHECK_SEC", RiskConfig.dead_pool_check_seconds),
+        ),
+        compounding=CompoundingConfig(
+            reinvest_ratio=_env_float("REINVEST_RATIO", CompoundingConfig.reinvest_ratio),
         ),
         dry_run=_env_bool("DRY_RUN", True),
         bot_token=getenv("BOT_TOKEN"),
