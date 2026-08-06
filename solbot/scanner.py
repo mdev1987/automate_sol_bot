@@ -139,9 +139,6 @@ class Scanner:
             dev_sol=dev_sol,
             liquidity_usd=pair.liquidity_usd,
         )
-        if s.total < self._thresholds.min_score:
-            return None
-
         log.info("QUALIFIED %s (%s) score=%.1f", symbol, mint, s.total)
         return Signal(
             mint=mint,

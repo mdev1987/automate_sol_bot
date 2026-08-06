@@ -205,7 +205,18 @@ class Trader:
                 await asyncio.sleep(5.0)
                 continue
             signal = await signals.get()
-            await self._open(signal)
+            # Several tokens may have qualified while we were busy. We're a
+            # single-position bot, so accept them all (nothing is dropped) and
+            # take the highest-scored one first.
+            best = signal
+            while True:
+                try:
+                    nxt = signals.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if nxt.score.total > best.score.total:
+                    best = nxt
+            await self._open(best)
 
     # ------------------------------------------------------------- position open
     async def _open(self, signal: Signal) -> None:
