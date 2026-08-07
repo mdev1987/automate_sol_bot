@@ -43,6 +43,11 @@ class ScannerThresholds:
     min_buy_sell_ratio: float = 1.1       # more buyers than sellers -> momentum
     min_volume_5m: float = 250            # $250 of volume in the last 5 minutes
     max_market_cap: float = 10_000_000    # deep caps are usually late entries
+
+    # -- throughput / backpressure ------------------------------------------
+    max_pending_evaluations: int = 500     # bounded pending queue (drop oldest)
+    max_evaluation_workers: int = 25       # concurrent evaluations
+    max_scan_window_sec: int = 90          # best-effort DexScreener wait
     # NOTE: no min_score here — the score does NOT gate entry. It is only
     # used to rank qualified tokens and pick the best when several qualify.
 
@@ -76,6 +81,36 @@ class CompoundingConfig:
 
 
 @dataclass(frozen=True)
+class QuoteConfig:
+    """Jupiter quote-gate: tradability checks, retries, and throttling.
+
+    The bot only executes a swap after a verified quote passes these rules —
+    a new launch with no route is skipped, not blindly bought.
+    """
+
+    max_price_impact_pct: float = 10.0       # reject quotes above this impact
+    retries: int = 5                          # quote retries for "no route"
+    retry_delay_sec: float = 0.5              # delay between retries
+    rate_per_sec: float = 20.0                # global quote rate limit
+    cache_ttl_sec: float = 1.5                # dedupe bursts for the same (mint, amount)
+
+    # Liquidity-based slippage tiers: (liquidity_floor_usd, slippage_bps).
+    # Table-driven so tuning is a one-line change; last tier uses inf.
+    slippage_tiers: tuple = (
+        (20_000, 2000),
+        (100_000, 1000),
+        (float("inf"), 300),
+    )
+
+    def slippage_for(self, liquidity_usd: float) -> int:
+        """Pick the slippage tier for a given liquidity level."""
+        for floor, bps in self.slippage_tiers:
+            if liquidity_usd < floor:
+                return bps
+        return self.slippage_tiers[-1][1]
+
+
+@dataclass(frozen=True)
 class Settings:
     """Full application settings derived from ``.env`` and package defaults."""
 
@@ -102,6 +137,7 @@ class Settings:
     exit: ExitConfig = field(default_factory=ExitConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     compounding: CompoundingConfig = field(default_factory=CompoundingConfig)
+    quote: QuoteConfig = field(default_factory=QuoteConfig)
 
     # -- wallet ---------------------------------------------------------------
     @property
@@ -167,6 +203,31 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
+def _env_tiers(key: str, default: tuple) -> tuple:
+    """Parse ``floor:bps,floor:bps,...`` into a slippage tier tuple.
+
+    ``floor`` may be ``inf`` for the last (catch-all) tier.
+    """
+    raw = _env(key, "")
+    if not raw:
+        return default
+    tiers: list = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        floor_s, _, bps_s = part.partition(":")
+        try:
+            floor = float("inf") if floor_s.strip() == "inf" else float(floor_s)
+            bps = int(bps_s)
+        except ValueError:
+            continue
+        tiers.append((floor, bps))
+    if not tiers:
+        return default
+    return tuple(sorted(tiers, key=lambda t: (t[0] != float("inf"), t[0])))
+
+
 def load_settings() -> Settings:
     """Build the full :class:`Settings` from the environment."""
     _load_env()
@@ -187,6 +248,9 @@ def load_settings() -> Settings:
             min_buy_sell_ratio=_env_float("MIN_BUY_SELL_RATIO", ScannerThresholds.min_buy_sell_ratio),
             min_volume_5m=_env_float("MIN_VOLUME_5M", ScannerThresholds.min_volume_5m),
             max_market_cap=_env_float("MAX_MARKET_CAP", ScannerThresholds.max_market_cap),
+            max_pending_evaluations=_env_int("MAX_PENDING_EVALUATIONS", ScannerThresholds.max_pending_evaluations),
+            max_evaluation_workers=_env_int("MAX_EVALUATION_WORKERS", ScannerThresholds.max_evaluation_workers),
+            max_scan_window_sec=_env_int("MAX_SCAN_WINDOW_SEC", ScannerThresholds.max_scan_window_sec),
         ),
         exit=ExitConfig(
             take_profit_mult=_env_float("TAKE_PROFIT_MULT", ExitConfig.take_profit_mult),
@@ -203,6 +267,14 @@ def load_settings() -> Settings:
         ),
         compounding=CompoundingConfig(
             reinvest_ratio=_env_float("REINVEST_RATIO", CompoundingConfig.reinvest_ratio),
+        ),
+        quote=QuoteConfig(
+            max_price_impact_pct=_env_float("MAX_PRICE_IMPACT_PCT", QuoteConfig.max_price_impact_pct),
+            retries=_env_int("QUOTE_RETRIES", QuoteConfig.retries),
+            retry_delay_sec=_env_float("QUOTE_RETRY_DELAY_SEC", QuoteConfig.retry_delay_sec),
+            rate_per_sec=_env_float("QUOTE_RATE_PER_SEC", QuoteConfig.rate_per_sec),
+            cache_ttl_sec=_env_float("QUOTE_CACHE_TTL_SEC", QuoteConfig.cache_ttl_sec),
+            slippage_tiers=_env_tiers("SLIPPAGE_TIERS", QuoteConfig.slippage_tiers),
         ),
         dry_run=_env_bool("DRY_RUN", True),
         bot_token=getenv("BOT_TOKEN"),

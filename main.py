@@ -140,6 +140,7 @@ class Bot:
 
         await self.journal.save_state(self.trader)
         log.info("%s", self.scanner.counters_summary())
+        log.info("%s", self.jupiter.quote_summary())
         await self.reporter.send_stopped(**self.trader.summary())
 
         for client in (self.dex, self.jup_price, self.jupiter):

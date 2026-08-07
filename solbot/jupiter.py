@@ -12,14 +12,21 @@ We trade **USDC** only. Amounts are passed in raw base units (USDC has 6
 decimals). Buy proceeds are captured from ``/execute``'s raw
 ``totalOutputAmount`` so we never need the token's decimals to sell later.
 
-Selling is slippage-resilient: on failure we retry with escalating
-slippage (config, then 300/500/1000 bps) before giving up.
+**Quote gate** — before ever executing a buy we hit ``/order`` and validate
+the assembled route: we reject when there is no usable route, the
+``actualOutAmount`` is zero, or price impact exceeds the configured cap. A
+new launch often briefly has no route, so we retry with a short delay. All
+quote requests are throttled (global rate limit) and briefly cached to
+collapse launch bursts, with latency measured to catch the next bottleneck.
+Slippage is chosen dynamically from liquidity via configurable tiers.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -50,6 +57,25 @@ class SwapResult:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class QuoteResult:
+    """Outcome of a quote-gate call (verified order or a skip reason)."""
+
+    success: bool
+    order: Optional[dict]     # valid ``/order`` payload, ready to execute
+    input_amount: int         # raw USDC
+    output_amount: int        # raw expected out
+    price_impact_pct: float
+    route_count: int
+    latency_ms: float
+    reason: str = ""          # "ok" | "no_route" | "price_impact" | "error"
+
+    @property
+    def retryable(self) -> bool:
+        """True when a retry could plausibly succeed (route not ready yet)."""
+        return self.reason == "no_route"
+
+
 class JupiterSwap:
     """Async wrapper around the managed /order + /execute swap path."""
 
@@ -59,8 +85,19 @@ class JupiterSwap:
         if settings.jupiter_api_key:
             self._headers["x-api-key"] = settings.jupiter_api_key
         self._slippage_bps = settings.slippage_bps
+        self._qcfg = settings.quote
         self._keypair: Optional[Keypair] = settings.keypair
         self._client = httpx.AsyncClient(timeout=20.0)
+
+        # -- quote gate state -------------------------------------------------
+        self._quote_lock = asyncio.Lock()
+        self._next_quote_ts: float = 0.0
+        self._quote_cache: dict = {}          # (mint, amount, slippage) -> (ts, result)
+        self._qstats: dict[str, int] = {"quotes": 0, "ok": 0,
+                                        "no_route": 0, "impact": 0, "error": 0}
+        self._lat_sum = 0.0
+        self._lat_count = 0
+        self._lat_max = 0.0
 
     async def close(self) -> None:
         """Release the underlying HTTP client."""
@@ -70,6 +107,16 @@ class JupiterSwap:
     def ready(self) -> bool:
         """False when we have no wallet key to sign with (dry-run only)."""
         return self._keypair is not None
+
+    def quote_summary(self) -> str:
+        """One-line quote-gate + latency summary."""
+        q = self._qstats
+        avg = self._lat_sum / self._lat_count if self._lat_count else 0.0
+        return (
+            f"quotes quotes={q['quotes']} ok={q['ok']} no_route={q['no_route']} "
+            f"impact={q['impact']} error={q['error']} "
+            f"latency avg={avg:.0f}ms max={self._lat_max:.0f}ms"
+        )
 
     # ------------------------------------------------------------------- order
     async def _order(
@@ -108,8 +155,6 @@ class JupiterSwap:
             raise JupiterError("no wallet key configured; cannot sign (dry-run?)")
         raw = base64.b64decode(b64_transaction)
         tx = VersionedTransaction.from_bytes(raw)
-        # A Jupiter order tx arrives with an empty signature slot; sign its
-        # message bytes and repopulate the single (wallet) signature.
         if any(sig != b"\x00" * 64 for sig in tx.signatures):
             log.warning("transaction already partially signed")
         signature = self._keypair.sign_message(tx.message.serialize())
@@ -143,12 +188,90 @@ class JupiterSwap:
             output_amount=int(data.get("totalOutputAmount") or 0),
         )
 
+    # ------------------------------------------------------------------- quote
+    async def _quote_slot(self) -> None:
+        """Throttle all quote requests to the configured per-second rate."""
+        interval = 1.0 / max(self._qcfg.rate_per_sec, 0.1)
+        async with self._quote_lock:
+            now = time.monotonic()
+            wait = self._next_quote_ts - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+                now = time.monotonic()
+            self._next_quote_ts = now + interval
+
+    def _record_latency(self, ms: float) -> None:
+        self._lat_sum += ms
+        self._lat_count += 1
+        self._lat_max = max(self._lat_max, ms)
+
+    async def _do_quote(self, mint: str, amount_raw: int, slippage_bps: int) -> QuoteResult:
+        """Fetch one order and validate it against the quote-gate rules."""
+        self._qstats["quotes"] += 1
+        await self._quote_slot()
+        t0 = time.monotonic()
+        try:
+            order = await self._order(USDC_MINT, mint, amount_raw, slippage_bps)
+        except JupiterError as exc:
+            self._qstats["error"] += 1
+            return QuoteResult(False, None, amount_raw, 0, 0.0, 0, 0.0, "error")
+
+        latency_ms = (time.monotonic() - t0) * 1000
+        self._record_latency(latency_ms)
+
+        out = int(order.get("actualOutAmount") or 0)
+        impact = float(order.get("priceImpactPct") or 0.0)
+        route = order.get("routePlan") or []
+        if out <= 0 or not route:
+            self._qstats["no_route"] += 1
+            return QuoteResult(False, order, amount_raw, out, impact, len(route), latency_ms, "no_route")
+        if impact > self._qcfg.max_price_impact_pct:
+            self._qstats["impact"] += 1
+            return QuoteResult(False, order, amount_raw, out, impact, len(route), latency_ms, "price_impact")
+        self._qstats["ok"] += 1
+        return QuoteResult(True, order, amount_raw, out, impact, len(route), latency_ms, "ok")
+
+    async def quote(
+        self,
+        mint: str,
+        amount_raw: int,
+        liquidity_usd: float = 0.0,
+    ) -> Optional[QuoteResult]:
+        """Verify tradability for ``mint`` and return a ready-to-execute order.
+
+        Chooses slippage from ``liquidity_usd`` tiers, retries "no route"
+        briefly (new launches race their liquidity), and caches the result
+        briefly to collapse simultaneous evaluations of the same token.
+        """
+        slippage = self._qcfg.slippage_for(max(liquidity_usd, 0.0))
+        key = (mint, amount_raw, slippage)
+
+        now = time.monotonic()
+        cached = self._quote_cache.get(key)
+        if cached and now - cached[0] < self._qcfg.cache_ttl_sec:
+            return cached[1]
+
+        result: Optional[QuoteResult] = None
+        for attempt in range(max(self._qcfg.retries, 1)):
+            result = await self._do_quote(mint, amount_raw, slippage)
+            if result.success or not result.retryable:
+                break
+            log.info("quote: no route for %s (attempt %d)", mint, attempt + 1)
+            if attempt + 1 < self._qcfg.retries:
+                await asyncio.sleep(self._qcfg.retry_delay_sec)
+
+        if result is not None:
+            self._quote_cache[key] = (time.monotonic(), result)
+        return result
+
     # ------------------------------------------------------------- high level
-    async def buy(self, mint: str, amount_usdc: float) -> SwapResult:
-        """Buy ``amount_usdc`` worth of ``mint`` using USDC."""
+    async def buy(self, mint: str, amount_usdc: float, liquidity_usd: float = 0.0) -> SwapResult:
+        """Buy ``amount_usdc`` worth of ``mint`` (USDC in), via a verified quote."""
         amount_raw = int(amount_usdc * (10 ** USDC_DECIMALS))
-        order = await self._order(USDC_MINT, mint, amount_raw, self._slippage_bps)
-        return await self.execute(order)
+        quote = await self.quote(mint, amount_raw, liquidity_usd)
+        if quote is None or not quote.success:
+            return SwapResult(False, "", amount_raw, 0, quote.reason if quote else "no quote")
+        return await self.execute(quote.order)
 
     async def sell(self, mint: str, amount_raw: int) -> SwapResult:
         """Sell ``amount_raw`` of ``mint`` for USDC, escalating slippage."""

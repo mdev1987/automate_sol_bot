@@ -31,9 +31,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .config import Settings
+from .config import USDC_DECIMALS, Settings
 from .dex_screener import DexScreener
-from .jupiter import JupiterSwap
+from .jupiter import JupiterSwap, QuoteResult
 from .prices import JupiterPrice
 from .reporter import TelegramNotifier
 from .scanner import Signal
@@ -166,6 +166,15 @@ class Trader:
         self._consec_losses = 0
         self._paused_until: float = 0.0
         self._started_at = time.monotonic()
+        # Why signals were skipped at the quote-gate (never reached a buy).
+        self._skip_stats: dict[str, int] = {}
+
+    def skip_summary(self) -> str:
+        """Breakdown of signals skipped at the quote gate (if any)."""
+        if not self._skip_stats:
+            return "skips none"
+        parts = ", ".join(f"{k}={v}" for k, v in sorted(self._skip_stats.items()))
+        return f"skips {parts}"
 
     # ------------------------------------------------------------------ accessors
     @property
@@ -261,13 +270,35 @@ class Trader:
 
     # ------------------------------------------------------------- position open
     async def _open(self, signal: Signal) -> None:
-        """Execute the entry for a qualified signal."""
+        """Execute the entry for a qualified signal, gated by a verified quote.
+
+        We do **not** reserve capital until a quote proves the token is
+        tradable (route exists, output > 0, impact within cap). Unbuyable
+        tokens are skipped and counted, never force-bought.
+        """
         amount = self.play_amount
         price = await self._get_price(signal.mint)
+        liq = signal.pair.liquidity_usd if signal.pair else 0.0
+        vol = signal.pair.volume_m5 if signal.pair else 0.0
+        ratio = signal.pair.buy_sell_ratio if signal.pair else 0.0
+        pair_price = signal.pair.price_usd if signal.pair else 0.0
+
+        # Quote-gate. Needs a wallet key (the taker pubkey is part of the
+        # /order request); in a key-less dry run we skip it and simulate.
+        quote: Optional[QuoteResult] = None
+        if self._jupiter.ready:
+            quote = await self._jupiter.quote(
+                signal.mint, int(amount * (10 ** USDC_DECIMALS)), liq
+            )
+            if quote is None or not quote.success:
+                reason = quote.reason if quote else "no_quote"
+                self._skip_stats[reason] = self._skip_stats.get(reason, 0) + 1
+                log.info("SKIP %s (%s): quote-gate %s", signal.symbol, signal.mint, reason)
+                return
 
         if self._settings.dry_run:
             # Paper entry: simulate, no real swap.
-            entry_price = price if price else signal.pair.price_usd or 0.0
+            entry_price = price if price else pair_price
             if entry_price <= 0:
                 log.info("skip %s: no entry price", signal.symbol)
                 return
@@ -283,22 +314,20 @@ class Trader:
             log.info("PAPER BUY %s @ $%.8f for $%.4f", signal.symbol, entry_price, amount)
             await self._reporter.send_buy(
                 signal.mint, signal.symbol, signal.score.total, entry_price,
-                signal.pair.liquidity_usd, signal.pair.volume_m5,
-                signal.pair.buy_sell_ratio, signal.age_seconds, amount,
+                liq, vol, ratio, signal.age_seconds, amount,
                 self.balance_usd, signal.rug_verdict,
             )
             return
 
-        # Live entry via Jupiter.
         if not self._jupiter.ready:
             log.error("cannot trade live: no wallet key configured")
             return
-        result = await self._jupiter.buy(signal.mint, amount)
+        result = await self._jupiter.execute(quote.order)
         if not result.success:
             log.error("buy failed %s: %s", signal.symbol, result.error)
             await self._reporter.send_alert("Buy failed", signal.symbol)
             return
-        entry_price = price or signal.pair.price_usd or 0.0
+        entry_price = price or pair_price or 0.0
         self.position = Position(
             mint=signal.mint, symbol=signal.symbol,
             entry_price_usd=entry_price, entry_amount_usd=amount,
@@ -311,8 +340,7 @@ class Trader:
         log.info("LIVE BUY %s sig=%s", signal.symbol, result.signature)
         await self._reporter.send_buy(
             signal.mint, signal.symbol, signal.score.total, entry_price,
-            signal.pair.liquidity_usd, signal.pair.volume_m5,
-            signal.pair.buy_sell_ratio, signal.age_seconds, amount,
+            liq, vol, ratio, signal.age_seconds, amount,
             self.balance_usd, signal.rug_verdict,
         )
 
@@ -421,4 +449,5 @@ class Trader:
             "pnl_usdc": s.total_pnl_usd,
             "balance_usdc": self.balance_usd,
             "exit_counts": s.exit_counts,
+            "skips": self.skip_summary(),
         }

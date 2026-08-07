@@ -203,6 +203,7 @@ class TelegramNotifier:
         pnl_usdc: float,
         balance_usdc: float,
         exit_counts: dict,
+        skips: str = "",
     ) -> None:
         """Periodic summary card."""
         minutes = runtime_s / 60
@@ -215,6 +216,7 @@ class TelegramNotifier:
             f"{SEP} Runtime `{minutes:.0f}m` {SEP} Trades `{trades}`\n"
             f"{SEP} WinRate `{win_rate:.1f}%` {SEP} PnL `{s}${self._f(pnl_usdc)}`\n"
             f"{SEP} Balance `${self._f(balance_usdc)}` USDC\n"
+            f"{SEP} Quote-gate `{skips}`\n"
             f"{exits}"
         )
 
@@ -226,6 +228,7 @@ class TelegramNotifier:
         pnl_usdc: float,
         balance_usdc: float,
         exit_counts: dict,
+        skips: str = "",
     ) -> None:
         """Shutdown card; same stats as :meth:`send_status`."""
         minutes = runtime_s / 60
@@ -234,5 +237,6 @@ class TelegramNotifier:
             f"{ICONS['stop']} **Bot Stopped**\n"
             f"{SEP} Runtime `{minutes:.0f}m` {SEP} Trades `{trades}`\n"
             f"{SEP} WinRate `{win_rate:.1f}%` {SEP} PnL `{s}${self._f(pnl_usdc)}`\n"
-            f"{SEP} Balance `${self._f(balance_usdc)}` USDC"
+            f"{SEP} Balance `${self._f(balance_usdc)}` USDC\n"
+            f"{SEP} Quote-gate `{skips}`"
         )
