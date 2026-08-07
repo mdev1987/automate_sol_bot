@@ -84,6 +84,7 @@ class QuoteResult:
     #   "quote_http_error"       transport/5xx/other 4xx failure
     #   "quote_invalid_response" 200 but payload unusable (bad JSON, no tx)
     #   "quote_rate_limited"     HTTP 429
+    #   "quote_insufficient_funds" taker lacks balance to assemble the order
     #   "quote_exception"        unexpected error while quoting
 
     @property
@@ -113,6 +114,11 @@ class JupiterSwap:
             self._keypair = Keypair()
             log.info("PAPER QUOTE KEYPAIR ACTIVE pubkey=%s execution=disabled "
                      "(throwaway key; never signs)", self._keypair.pubkey())
+        # In paper mode (no real wallet) the throwaway key has no balance, so
+        # /order would always fail with "Insufficient funds". Omit the taker
+        # instead: /order returns the quote with no transaction (docs), which
+        # validates tradability without any funded wallet.
+        self._paper_quoting = settings.keypair is None and settings.dry_run
         self._client = httpx.AsyncClient(timeout=20.0)
 
         # -- quote gate state -------------------------------------------------
@@ -124,6 +130,7 @@ class JupiterSwap:
             "quote_no_route": 0, "quote_impact": 0,
             "quote_timeout": 0, "quote_http_error": 0,
             "quote_invalid_response": 0, "quote_rate_limited": 0,
+            "quote_insufficient_funds": 0,
             "quote_exception": 0,
         }
         self._lat_sum = 0.0
@@ -148,6 +155,7 @@ class JupiterSwap:
             f"no_route={q['quote_no_route']} impact={q['quote_impact']} "
             f"timeout={q['quote_timeout']} http={q['quote_http_error']} "
             f"invalid={q['quote_invalid_response']} "
+            f"no_funds={q['quote_insufficient_funds']} "
             f"rate_limit={q['quote_rate_limited']} exc={q['quote_exception']} "
             f"latency avg={avg:.0f}ms max={self._lat_max:.0f}ms"
         )
@@ -159,15 +167,23 @@ class JupiterSwap:
         output_mint: str,
         amount: int,
         slippage_bps: int,
+        taker: Optional[str] = None,
     ) -> dict:
-        """Request an assembled swap transaction from Jupiter."""
+        """Request a swap quote (and, with a taker, an assembled transaction).
+
+        Live mode passes ``taker`` so Jupiter builds an executable transaction;
+        paper mode omits it, which returns just the quote (transaction null) —
+        tradability without needing a funded wallet, and without the
+        "Insufficient funds" failures an empty throwaway taker triggers.
+        """
         params = {
             "inputMint": input_mint,
             "outputMint": output_mint,
             "amount": str(amount),
-            "taker": str(self._keypair.pubkey()),
             "slippageBps": slippage_bps,
         }
+        if taker is not None:
+            params["taker"] = str(taker)
         resp = await self._client.get(
             f"{self._base}/swap/v2/order", params=params, headers=self._headers
         )
@@ -183,7 +199,7 @@ class JupiterSwap:
                 f"order invalid JSON: {resp.text[:200]}", status=200
             ) from exc
         transaction = data.get("transaction")
-        if not transaction:
+        if taker is not None and not transaction:
             raise JupiterError(
                 f"order failed: {data.get('errorMessage') or data.get('error') or data}",
                 status=200,
@@ -250,6 +266,10 @@ class JupiterSwap:
     def _classify_error(self, exc: JupiterError) -> str:
         """Map a Jupiter order failure to a skip-taxonomy reason."""
         st = exc.status
+        if "insufficient" in str(exc).lower():
+            # /order succeeded HTTP-wise, but the (live) taker lacks balance
+            # (USDC / SOL / ATA) to assemble the transaction.
+            return "quote_insufficient_funds"
         if st == 429:
             return "quote_rate_limited"
         if st and 500 <= st < 600:
@@ -268,7 +288,13 @@ class JupiterSwap:
         await self._quote_slot()
         t0 = time.monotonic()
         try:
-            order = await self._order(USDC_MINT, mint, amount_raw, slippage_bps)
+            if self._paper_quoting:
+                order = await self._order(USDC_MINT, mint, amount_raw, slippage_bps)
+            else:
+                order = await self._order(
+                    USDC_MINT, mint, amount_raw, slippage_bps,
+                    str(self._keypair.pubkey()),
+                )
         except httpx.TimeoutException as exc:
             reason = "quote_timeout"
             self._qstats[reason] += 1
@@ -292,9 +318,13 @@ class JupiterSwap:
         self._record_latency(latency_ms)
         fetched_at = time.monotonic()
 
-        out = int(order.get("actualOutAmount") or 0)
-        impact = float(order.get("priceImpactPct") or 0.0)
-        route = order.get("routePlan") or []
+        out = int(order.get("outAmount") or order.get("actualOutAmount") or 0)
+        # priceImpact is in percentage points (e.g. -0.1 == -0.1%); the old
+        # priceImpactPct is a decimal ratio, so scale it up to match.
+        impact = abs(float(order.get("priceImpact") or 0.0))
+        if impact == 0.0 and order.get("priceImpactPct"):
+            impact = abs(float(order["priceImpactPct"])) * 100.0
+        route = order.get("routePlan") or order.get("routes") or []
         if out <= 0 or not route:
             self._qstats["quote_no_route"] += 1
             return QuoteResult(False, order, amount_raw, out, impact, len(route), latency_ms, "quote_no_route", fetched_at)
@@ -347,6 +377,10 @@ class JupiterSwap:
         quote = await self.quote(mint, amount_raw, liquidity_usd)
         if quote is None or not quote.success:
             return SwapResult(False, "", amount_raw, 0, quote.reason if quote else "no quote")
+        if not (quote.order and quote.order.get("transaction")):
+            # Paper quoting (no taker) returns a verified route but no
+            # transaction — there is nothing to sign or execute.
+            return SwapResult(False, "", amount_raw, 0, "paper quote: no transaction to execute")
         return await self.execute(quote.order)
 
     async def sell(self, mint: str, amount_raw: int) -> SwapResult:
@@ -354,7 +388,10 @@ class JupiterSwap:
         last: Optional[SwapResult] = None
         for slippage in (self._slippage_bps,) + SELL_SLIPPAGE_ESCALATION:
             try:
-                order = await self._order(mint, USDC_MINT, amount_raw, slippage)
+                order = await self._order(
+                    mint, USDC_MINT, amount_raw, slippage,
+                    str(self._keypair.pubkey()),
+                )
             except JupiterError as exc:
                 log.warning("sell order @%dbps failed: %s", slippage, exc)
                 last = SwapResult(False, "", amount_raw, 0, str(exc))

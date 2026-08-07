@@ -398,8 +398,9 @@ class Trader:
         ratio = signal.pair.buy_sell_ratio if signal.pair else 0.0
         pair_price = signal.pair.price_usd if signal.pair else 0.0
 
-        # Quote-gate. Needs a wallet key (the taker pubkey is part of the
-        # /order request); in a key-less dry run we skip it and simulate.
+        # Quote-gate. Live mode needs a wallet key (the taker pubkey is part of the
+        # /order request); paper mode (dry-run, no real wallet) validates the
+        # same gate against /order without a taker — a quote, no transaction.
         quote: Optional[QuoteResult] = None
         if self._jupiter.ready:
             quote = await self._jupiter.quote(

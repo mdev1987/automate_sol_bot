@@ -93,7 +93,7 @@ class QuoteConfig:
     max_price_impact_pct: float = 10.0       # reject quotes above this impact
     retries: int = 5                          # quote retries for "no route"
     retry_delay_sec: float = 0.5              # delay between retries
-    rate_per_sec: float = 20.0                # global quote rate limit
+    rate_per_sec: float = 3.0                  # global quote rate limit (free tier ~1/s)
     cache_ttl_sec: float = 1.5                # dedupe bursts for the same (mint, amount)
     max_quote_age_ms: float = 3000.0          # stale-quote guard before executing
 
