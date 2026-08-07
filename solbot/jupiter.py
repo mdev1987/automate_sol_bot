@@ -45,6 +45,10 @@ SELL_SLIPPAGE_ESCALATION = (200, 300, 500, 1000)
 class JupiterError(RuntimeError):
     """Raised when a swap order/execute fails and cannot be retried."""
 
+    def __init__(self, message: str, status: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status = status
+
 
 @dataclass(frozen=True)
 class SwapResult:
@@ -68,12 +72,26 @@ class QuoteResult:
     price_impact_pct: float
     route_count: int
     latency_ms: float
-    reason: str = ""          # "ok" | "no_route" | "price_impact" | "error"
+    reason: str = ""          # see quote failure taxonomy below
+
+    # Skip taxonomy — the trader counts these, so an API outage is never
+    # mistaken for "no route":
+    #   "ok"                     verified order, ready to execute
+    #   "quote_no_route"         Jupiter found no usable route (400 "No route")
+    #   "quote_impact"           route exists but price impact above the cap
+    #   "quote_timeout"          the /order request timed out
+    #   "quote_http_error"       transport/5xx/other 4xx failure
+    #   "quote_invalid_response" 200 but payload unusable (bad JSON, no tx)
+    #   "quote_rate_limited"     HTTP 429
+    #   "quote_exception"        unexpected error while quoting
 
     @property
     def retryable(self) -> bool:
         """True when a retry could plausibly succeed (route not ready yet)."""
-        return self.reason == "no_route"
+        return self.reason in (
+            "quote_no_route", "quote_timeout",
+            "quote_http_error", "quote_rate_limited", "quote_exception",
+        )
 
 
 class JupiterSwap:
@@ -87,14 +105,26 @@ class JupiterSwap:
         self._slippage_bps = settings.slippage_bps
         self._qcfg = settings.quote
         self._keypair: Optional[Keypair] = settings.keypair
+        if self._keypair is None and settings.dry_run:
+            # Paper mode with no real wallet: derive a throwaway keypair purely
+            # so the quote-gate runs (/order needs a taker pubkey). It never
+            # signs or executes anything.
+            self._keypair = Keypair()
+            log.info("PAPER QUOTE KEYPAIR ACTIVE pubkey=%s execution=disabled "
+                     "(throwaway key; never signs)", self._keypair.pubkey())
         self._client = httpx.AsyncClient(timeout=20.0)
 
         # -- quote gate state -------------------------------------------------
         self._quote_lock = asyncio.Lock()
         self._next_quote_ts: float = 0.0
         self._quote_cache: dict = {}          # (mint, amount, slippage) -> (ts, result)
-        self._qstats: dict[str, int] = {"quotes": 0, "ok": 0,
-                                        "no_route": 0, "impact": 0, "error": 0}
+        self._qstats: dict[str, int] = {
+            "quotes": 0, "ok": 0,
+            "quote_no_route": 0, "quote_impact": 0,
+            "quote_timeout": 0, "quote_http_error": 0,
+            "quote_invalid_response": 0, "quote_rate_limited": 0,
+            "quote_exception": 0,
+        }
         self._lat_sum = 0.0
         self._lat_count = 0
         self._lat_max = 0.0
@@ -105,7 +135,7 @@ class JupiterSwap:
 
     @property
     def ready(self) -> bool:
-        """False when we have no wallet key to sign with (dry-run only)."""
+        """True when we can quote/sign; paper mode uses a throwaway keypair."""
         return self._keypair is not None
 
     def quote_summary(self) -> str:
@@ -113,8 +143,11 @@ class JupiterSwap:
         q = self._qstats
         avg = self._lat_sum / self._lat_count if self._lat_count else 0.0
         return (
-            f"quotes quotes={q['quotes']} ok={q['ok']} no_route={q['no_route']} "
-            f"impact={q['impact']} error={q['error']} "
+            f"quotes quotes={q['quotes']} ok={q['ok']} "
+            f"no_route={q['quote_no_route']} impact={q['quote_impact']} "
+            f"timeout={q['quote_timeout']} http={q['quote_http_error']} "
+            f"invalid={q['quote_invalid_response']} "
+            f"rate_limit={q['quote_rate_limited']} exc={q['quote_exception']} "
             f"latency avg={avg:.0f}ms max={self._lat_max:.0f}ms"
         )
 
@@ -138,13 +171,21 @@ class JupiterSwap:
             f"{self._base}/swap/v2/order", params=params, headers=self._headers
         )
         if resp.status_code != 200:
-            raise JupiterError(f"order HTTP {resp.status_code}: {resp.text[:200]}")
-
-        data = resp.json()
+            raise JupiterError(
+                f"order HTTP {resp.status_code}: {resp.text[:200]}",
+                status=resp.status_code,
+            )
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise JupiterError(
+                f"order invalid JSON: {resp.text[:200]}", status=200
+            ) from exc
         transaction = data.get("transaction")
         if not transaction:
             raise JupiterError(
-                f"order failed: {data.get('errorMessage') or data.get('error') or data}"
+                f"order failed: {data.get('errorMessage') or data.get('error') or data}",
+                status=200,
             )
         return data
 
@@ -205,6 +246,21 @@ class JupiterSwap:
         self._lat_count += 1
         self._lat_max = max(self._lat_max, ms)
 
+    def _classify_error(self, exc: JupiterError) -> str:
+        """Map a Jupiter order failure to a skip-taxonomy reason."""
+        st = exc.status
+        if st == 429:
+            return "quote_rate_limited"
+        if st and 500 <= st < 600:
+            return "quote_http_error"
+        if st and 400 <= st < 500:
+            # 400 with "no route" means Jupiter simply can't route the trade;
+            # anything else is an API/param problem we must not mask.
+            return "quote_no_route" if "route" in str(exc).lower() else "quote_http_error"
+        if "route" in str(exc).lower():
+            return "quote_no_route"
+        return "quote_invalid_response"
+
     async def _do_quote(self, mint: str, amount_raw: int, slippage_bps: int) -> QuoteResult:
         """Fetch one order and validate it against the quote-gate rules."""
         self._qstats["quotes"] += 1
@@ -212,9 +268,24 @@ class JupiterSwap:
         t0 = time.monotonic()
         try:
             order = await self._order(USDC_MINT, mint, amount_raw, slippage_bps)
+        except httpx.TimeoutException as exc:
+            reason = "quote_timeout"
+            self._qstats[reason] += 1
+            log.warning("quote timeout for %s: %s", mint, exc)
+            return QuoteResult(False, None, amount_raw, 0, 0.0, 0, 0.0, reason)
         except JupiterError as exc:
-            self._qstats["error"] += 1
-            return QuoteResult(False, None, amount_raw, 0, 0.0, 0, 0.0, "error")
+            reason = self._classify_error(exc)
+            self._qstats[reason] += 1
+            log.info("quote %s for %s: %s", reason, mint, exc)
+            return QuoteResult(False, None, amount_raw, 0, 0.0, 0, 0.0, reason)
+        except httpx.RequestError as exc:
+            self._qstats["quote_http_error"] += 1
+            log.warning("quote http error for %s: %s", mint, exc)
+            return QuoteResult(False, None, amount_raw, 0, 0.0, 0, 0.0, "quote_http_error")
+        except Exception as exc:  # noqa: BLE001
+            self._qstats["quote_exception"] += 1
+            log.exception("quote exception for %s: %s", mint, exc)
+            return QuoteResult(False, None, amount_raw, 0, 0.0, 0, 0.0, "quote_exception")
 
         latency_ms = (time.monotonic() - t0) * 1000
         self._record_latency(latency_ms)
@@ -223,11 +294,11 @@ class JupiterSwap:
         impact = float(order.get("priceImpactPct") or 0.0)
         route = order.get("routePlan") or []
         if out <= 0 or not route:
-            self._qstats["no_route"] += 1
-            return QuoteResult(False, order, amount_raw, out, impact, len(route), latency_ms, "no_route")
+            self._qstats["quote_no_route"] += 1
+            return QuoteResult(False, order, amount_raw, out, impact, len(route), latency_ms, "quote_no_route")
         if impact > self._qcfg.max_price_impact_pct:
-            self._qstats["impact"] += 1
-            return QuoteResult(False, order, amount_raw, out, impact, len(route), latency_ms, "price_impact")
+            self._qstats["quote_impact"] += 1
+            return QuoteResult(False, order, amount_raw, out, impact, len(route), latency_ms, "quote_impact")
         self._qstats["ok"] += 1
         return QuoteResult(True, order, amount_raw, out, impact, len(route), latency_ms, "ok")
 
@@ -256,7 +327,7 @@ class JupiterSwap:
             result = await self._do_quote(mint, amount_raw, slippage)
             if result.success or not result.retryable:
                 break
-            log.info("quote: no route for %s (attempt %d)", mint, attempt + 1)
+            log.info("quote %s for %s (attempt %d)", result.reason, mint, attempt + 1)
             if attempt + 1 < self._qcfg.retries:
                 await asyncio.sleep(self._qcfg.retry_delay_sec)
 

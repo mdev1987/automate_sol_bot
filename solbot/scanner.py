@@ -6,7 +6,7 @@ The scanner turns raw PumpDev launch frames into qualified buy signals:
     rug-check -> score -> emit Signal
 
 DexScreener is now only a **supplemental** source, not the gate. We wait a
-short, bounded ``max_scan_window_sec`` (default 90s) for a pair; if none
+short, bounded ``max_scan_window_sec`` (default 30s) for a pair; if none
 appears the candidate still goes forward to the Jupiter quote-gate, which —
 not DexScreener — is the authority on tradability. A bounded pending
 queue feeds a fixed worker pool so memory and concurrency stay

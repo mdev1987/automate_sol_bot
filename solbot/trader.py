@@ -124,10 +124,12 @@ class TraderStats:
         return self.wins / self.trades * 100 if self.trades else 0.0
 
     def record(self, position: Position) -> None:
+        """Count a closed trade. Zero-pnl ties count as trades but neither
+        win nor loss — a flat exit is "no edge", not a victory."""
         self.trades += 1
-        if position.pnl_usd >= 0:
+        if position.pnl_usd > 0:
             self.wins += 1
-        else:
+        elif position.pnl_usd < 0:
             self.losses += 1
         self.total_pnl_usd += position.pnl_usd
         self.exit_counts[position.exit_reason] = self.exit_counts.get(position.exit_reason, 0) + 1
@@ -205,7 +207,11 @@ class Trader:
         return True
 
     def _apply_compounding(self, position: Position) -> None:
-        """Split a win: reinvest ratio stays in play, the rest is saved."""
+        """Split a winning trade: reinvest ratio stays in play, rest saved.
+
+        Only called for actual winners (``pnl > 0``), so ``saved_amount``
+        tracks genuinely extracted profit — never a 40% cut of a flat trade.
+        """
         proceeds = position.exit_amount_usd
         ratio = self._settings.compounding.reinvest_ratio
         self.play_amount = proceeds * ratio
@@ -217,15 +223,20 @@ class Trader:
 
         The stake was reserved at entry (``play_amount`` -> 0), so closing a
         position must hand the proceeds back to the bankroll. Wins are split
-        by the compounding ratio; losses return the remaining proceeds and
-        therefore *reduce* the bankroll by the lost amount.
+        by the compounding ratio; losses and flat ties return the proceeds
+        wholesale — losses therefore *reduce* the bankroll by the lost
+        amount, ties add nothing.
         """
         self.stats.record(position)
-        if position.pnl_usd >= 0:
+        if position.pnl_usd > 0:
             self._consec_losses = 0
             self._apply_compounding(position)
         else:
-            self._consec_losses += 1
+            # Loss or tie: return whatever capital is left, no savings cut.
+            if position.pnl_usd < 0:
+                self._consec_losses += 1
+            else:
+                self._consec_losses = 0
             self.play_amount = position.exit_amount_usd
             if self._consec_losses >= self._risk.max_consec_losses:
                 self._paused_until = time.time() + self._risk.pause_seconds

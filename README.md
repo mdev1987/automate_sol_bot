@@ -14,7 +14,7 @@ HealthMonitor ←─ reporter ─→ Telegram      TradeJournal (csv + json)
 ```
 
 - **Scanner**: detects launches and funnels them through a bounded queue +
-  worker pool. It looks up the DexScreener pair for up to 90s (best-effort),
+  worker pool. It looks up the DexScreener pair for up to 30s (best-effort),
   then applies market filters → rug check → momentum score. Most pump
   launches are never indexed by DexScreener, so those go straight to the
   quote-gate instead of being dropped. The score *ranks* candidates only (it
@@ -45,7 +45,10 @@ uv run python main.py
 
 `.env` requires at minimum: `BOT_TOKEN`, `CHAT_ID` (Telegram),
 `WALLET_PRIVATE_KEY` (base58) and `JUPITER_API_KEY`. Start in **dry-run**
-(`DRY_RUN=true`) before going live.
+(`DRY_RUN=true`) before going live. In dry-run without a `WALLET_PRIVATE_KEY`
+the bot derives a throwaway keypair purely to run the Jupiter quote-gate
+(logged as `PAPER QUOTE KEYPAIR ACTIVE … execution=disabled`); it never signs
+or executes.
 
 ## Key env knobs
 
@@ -55,7 +58,7 @@ uv run python main.py
 | `STARTING_AMOUNT_USDC` | `2.00` | per-trade stake |
 | `SLIPPAGE_BPS` | `150` | sell slippage (buy slippage comes from `SLIPPAGE_TIERS`) |
 | `MAX_AGE_SECONDS` / `MIN_LIQUIDITY_USD` / `MIN_TXNS_5M` / `MIN_BUYS_5M` / `MIN_BUY_SELL_RATIO` / `MIN_VOLUME_5M` / `MAX_MARKET_CAP` | … | entry filters |
-| `MAX_PENDING_EVALUATIONS` / `MAX_EVALUATION_WORKERS` / `MAX_SCAN_WINDOW_SEC` | `500`/`25`/`90` | scanner queue + worker pool; pair-lookup window |
+| `MAX_PENDING_EVALUATIONS` / `MAX_EVALUATION_WORKERS` / `MAX_SCAN_WINDOW_SEC` | `500`/`25`/`30` | scanner queue + worker pool; pair-lookup window |
 | `MAX_PRICE_IMPACT_PCT` / `QUOTE_RETRIES` / `QUOTE_RETRY_DELAY_SEC` / `QUOTE_RATE_PER_SEC` / `QUOTE_CACHE_TTL_SEC` / `SLIPPAGE_TIERS` | `10`/`5`/`0.5`/`20`/`1.5`/`20000:2000,…` | Jupiter quote-gate: impact cap, retry, throttle, cache, slippage-by-liquidity |
 | `TAKE_PROFIT_MULT` / `STOP_LOSS_MULT` / `MAX_HOLD_SECONDS` / `POLL_INTERVAL_SEC` | `2.0`/`0.82`/`600`/`8` | exits |
 | `PLAY_FLOOR_USD` / `MAX_CONSEC_LOSSES` / `LOSS_PAUSE_SEC` / `REINVEST_RATIO` | … | risk & compounding |

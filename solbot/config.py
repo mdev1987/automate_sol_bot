@@ -47,7 +47,7 @@ class ScannerThresholds:
     # -- throughput / backpressure ------------------------------------------
     max_pending_evaluations: int = 500     # bounded pending queue (drop oldest)
     max_evaluation_workers: int = 25       # concurrent evaluations
-    max_scan_window_sec: int = 90          # best-effort DexScreener wait
+    max_scan_window_sec: int = 30          # best-effort DexScreener wait
     # NOTE: no min_score here — the score does NOT gate entry. It is only
     # used to rank qualified tokens and pick the best when several qualify.
 
