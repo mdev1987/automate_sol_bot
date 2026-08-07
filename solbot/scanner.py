@@ -5,10 +5,10 @@ The scanner turns raw PumpDev launch frames into qualified buy signals:
     create frame -> (best-effort DexScreener pair) -> filter ->
     rug-check -> score -> emit Signal
 
-DexScreener is now only a **supplemental** source, not the gate. We wait a
-short, bounded ``max_scan_window_sec`` (default 30s) for a pair; if none
-appears the candidate still goes forward to the Jupiter quote-gate, which —
-not DexScreener — is the authority on tradability. A bounded pending
+DexScreener is a **required** source for a signal: we wait a short, bounded
+``max_scan_window_sec`` (default 30s) for a pair; if none appears the
+candidate is skipped. A token with no indexed pair has no market data to
+trade on, so it is never scored or emitted as a signal. A bounded pending
 queue feeds a fixed worker pool so memory and concurrency stay
 deterministic under launch bursts.
 """
@@ -150,14 +150,15 @@ class Scanner:
 
     # ------------------------------------------------------------ evaluation
     async def _evaluate(self, create: dict) -> Optional[Signal]:
-        """Evaluate one candidate; a missing DexScreener pair is not fatal."""
+        """Evaluate one candidate; a DexScreener pair is required."""
         pair = await self._pair_liquidity(create.get("mint", ""))
         if pair is None:
             self._bump("no_pair")
             log.info("NO_PAIR %s: no DexScreener pair in %.0fs — "
-                     "proceeding to quote-gate (pair optional)",
+                     "skipped (pair required)",
                      create.get("symbol"),
                      self._thresholds.max_scan_window_sec)
+            return None
         signal = self._qualify(create, pair)
         if signal is not None and self._out_queue is not None:
             await self._out_queue.put(signal)
@@ -183,8 +184,6 @@ class Scanner:
         created_ms = create.get("timestamp") or time.time() * 1000
         age_seconds = time.time() - created_ms / 1000
 
-        # Market filters need a pair; without one we defer entirely to the
-        # Jupiter quote-gate rather than reject on missing DexScreener data.
         if pair is not None and (reason := self._filter_reason(pair, age_seconds)):
             self._bump("filtered")
             log.info("FILTERED %s (%s): %s liq=$%.0f vol=$%.0f txns=%d "
