@@ -66,7 +66,6 @@ class Pair:
             return float(min(self.buys_m5, _RATIO_CAP))
         return min(self.buys_m5 / self.sells_m5, _RATIO_CAP)
 
-    @property
     def is_dead(self, threshold_usd: float) -> bool:
         """True when liquidity collapsed below ``threshold_usd``."""
         return self.liquidity_usd <= threshold_usd
