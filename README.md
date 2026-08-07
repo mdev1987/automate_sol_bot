@@ -60,8 +60,9 @@ or executes.
 | `MAX_AGE_SECONDS` / `MIN_LIQUIDITY_USD` / `MIN_TXNS_5M` / `MIN_BUYS_5M` / `MIN_BUY_SELL_RATIO` / `MIN_VOLUME_5M` / `MAX_MARKET_CAP` | … | entry filters |
 | `MAX_PENDING_EVALUATIONS` / `MAX_EVALUATION_WORKERS` / `MAX_SCAN_WINDOW_SEC` | `500`/`25`/`30` | scanner queue + worker pool; pair-lookup window |
 | `MAX_PRICE_IMPACT_PCT` / `QUOTE_RETRIES` / `QUOTE_RETRY_DELAY_SEC` / `QUOTE_RATE_PER_SEC` / `QUOTE_CACHE_TTL_SEC` / `SLIPPAGE_TIERS` | `10`/`5`/`0.5`/`20`/`1.5`/`20000:2000,…` | Jupiter quote-gate: impact cap, retry, throttle, cache, slippage-by-liquidity |
+| `MAX_QUOTE_AGE_MS` | `3000` | drop an order older than this before submitting (stale-quote guard) |
 | `TAKE_PROFIT_MULT` / `STOP_LOSS_MULT` / `MAX_HOLD_SECONDS` / `POLL_INTERVAL_SEC` | `2.0`/`0.82`/`600`/`8` | exits |
-| `PLAY_FLOOR_USD` / `MAX_CONSEC_LOSSES` / `LOSS_PAUSE_SEC` / `REINVEST_RATIO` | … | risk & compounding |
+| `PLAY_FLOOR_USD` / `MAX_CONSEC_LOSSES` / `LOSS_PAUSE_SEC` / `REINVEST_RATIO` / `MIN_PLAY_USD` / `MAX_PLAY_USD` | … | risk & compounding (stake clamped between MIN/MAX) |
 
 ## Layout
 
@@ -78,4 +79,5 @@ solbot/trader.py         bankroll, entries (quote-gated), exits, risk
 solbot/jupiter.py        quote-gate + Swap V2 order/execute (dynamic slippage)
 solbot/reporter.py       Telegram cards
 solbot/monitoring.py     logging, journal, health watchdog
+scripts/analyze_trades.py score-bucket + exit-quality report (offline)
 ```

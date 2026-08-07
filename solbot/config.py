@@ -78,6 +78,8 @@ class CompoundingConfig:
     """Split a winning trade's proceeds between reinvest and savings."""
 
     reinvest_ratio: float = 0.6          # 60% goes back in, 40% is saved
+    min_play_amount_usd: float = 1.0     # floor for the reinvested stake
+    max_play_amount_usd: float = 25.0    # cap so a hot streak can't blow up
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,7 @@ class QuoteConfig:
     retry_delay_sec: float = 0.5              # delay between retries
     rate_per_sec: float = 20.0                # global quote rate limit
     cache_ttl_sec: float = 1.5                # dedupe bursts for the same (mint, amount)
+    max_quote_age_ms: float = 3000.0          # stale-quote guard before executing
 
     # Liquidity-based slippage tiers: (liquidity_floor_usd, slippage_bps).
     # Table-driven so tuning is a one-line change; last tier uses inf.
@@ -267,6 +270,8 @@ def load_settings() -> Settings:
         ),
         compounding=CompoundingConfig(
             reinvest_ratio=_env_float("REINVEST_RATIO", CompoundingConfig.reinvest_ratio),
+            min_play_amount_usd=_env_float("MIN_PLAY_USD", CompoundingConfig.min_play_amount_usd),
+            max_play_amount_usd=_env_float("MAX_PLAY_USD", CompoundingConfig.max_play_amount_usd),
         ),
         quote=QuoteConfig(
             max_price_impact_pct=_env_float("MAX_PRICE_IMPACT_PCT", QuoteConfig.max_price_impact_pct),
@@ -274,6 +279,7 @@ def load_settings() -> Settings:
             retry_delay_sec=_env_float("QUOTE_RETRY_DELAY_SEC", QuoteConfig.retry_delay_sec),
             rate_per_sec=_env_float("QUOTE_RATE_PER_SEC", QuoteConfig.rate_per_sec),
             cache_ttl_sec=_env_float("QUOTE_CACHE_TTL_SEC", QuoteConfig.cache_ttl_sec),
+            max_quote_age_ms=_env_float("MAX_QUOTE_AGE_MS", QuoteConfig.max_quote_age_ms),
             slippage_tiers=_env_tiers("SLIPPAGE_TIERS", QuoteConfig.slippage_tiers),
         ),
         dry_run=_env_bool("DRY_RUN", True),

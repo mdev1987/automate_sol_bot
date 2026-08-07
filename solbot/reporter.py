@@ -174,17 +174,20 @@ class TelegramNotifier:
         hold_s: float,
         balance_usdc: float,
         risk: str = "",
+        max_roi_pct: Optional[float] = None,
     ) -> None:
         """A sell/exit card with PnL expressed in USDC."""
         icon = ICONS.get(reason, "🔻")
         card = ICONS["sell_win"] if pnl_usd >= 0 else ICONS["sell_loss"]
         s = self._sign(pnl_usd)
         risk_emoji = RUG_EMOJI.get(risk, "") if risk else ""
+        peak = (f" {SEP} Peak `{max_roi_pct:.0f}%`"
+                if max_roi_pct is not None else "")
         await self._send(
             f"{card} **SELL {reason.upper()}** {icon} {risk_emoji}\n"
             f"`{(mint or '')[:10]}…`\n"
             f"{SEP} PnL `{s}${self._f(pnl_usd)}` {SEP} ROI `{s}{roi_pct:.1f}%`\n"
-            f"{SEP} In `${self._f(entry_usd)}` {SEP} Out `${self._f(exit_usd)}`\n"
+            f"{SEP} In `${self._f(entry_usd)}` {SEP} Out `${self._f(exit_usd)}`\n{peak}"
             f"{SEP} Held `{hold_s:.0f}s` {SEP} Bal `${self._f(balance_usdc)}` USDC"
         )
 

@@ -79,6 +79,7 @@ class TradeJournal:
         self._csv_headers = [
             "ts", "mint", "symbol", "reason", "entry_price", "exit_price",
             "entry_usdc", "exit_usdc", "pnl_usdc", "roi_pct", "hold_s", "score",
+            "entry_liq", "entry_age_s", "max_price", "max_roi_pct", "exit_attempts",
         ]
         self._ensure_csv()
 
@@ -104,6 +105,11 @@ class TradeJournal:
                 "roi_pct": f"{position.roi_pct:.2f}",
                 "hold_s": f"{position.hold_seconds:.1f}",
                 "score": f"{position.score:.1f}",
+                "entry_liq": f"{position.entry_liquidity_usd:.0f}",
+                "entry_age_s": f"{position.entry_age_seconds:.0f}",
+                "max_price": f"{position.max_price_usd:.8f}",
+                "max_roi_pct": f"{position.max_roi_pct:.2f}",
+                "exit_attempts": position.exit_attempts,
             }
             with self._trades_file.open("a", newline="", encoding="utf-8") as fh:
                 csv.DictWriter(fh, fieldnames=self._csv_headers).writerow(row)
@@ -122,6 +128,8 @@ class TradeJournal:
                 "losses": trader.stats.losses,
                 "total_pnl_usd": trader.stats.total_pnl_usd,
                 "exit_counts": trader.stats.exit_counts,
+                "exit_stats": trader.stats.exit_stats,
+                "score_buckets": trader.stats.score_buckets,
             },
             "consec_losses": trader._consec_losses,
             "paused_until": trader._paused_until,

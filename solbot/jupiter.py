@@ -72,7 +72,8 @@ class QuoteResult:
     price_impact_pct: float
     route_count: int
     latency_ms: float
-    reason: str = ""          # see quote failure taxonomy below
+    reason: str = ""               # see skip taxonomy below
+    fetched_at: float = 0.0        # time.monotonic() when the order was fetched
 
     # Skip taxonomy — the trader counts these, so an API outage is never
     # mistaken for "no route":
@@ -289,38 +290,42 @@ class JupiterSwap:
 
         latency_ms = (time.monotonic() - t0) * 1000
         self._record_latency(latency_ms)
+        fetched_at = time.monotonic()
 
         out = int(order.get("actualOutAmount") or 0)
         impact = float(order.get("priceImpactPct") or 0.0)
         route = order.get("routePlan") or []
         if out <= 0 or not route:
             self._qstats["quote_no_route"] += 1
-            return QuoteResult(False, order, amount_raw, out, impact, len(route), latency_ms, "quote_no_route")
+            return QuoteResult(False, order, amount_raw, out, impact, len(route), latency_ms, "quote_no_route", fetched_at)
         if impact > self._qcfg.max_price_impact_pct:
             self._qstats["quote_impact"] += 1
-            return QuoteResult(False, order, amount_raw, out, impact, len(route), latency_ms, "quote_impact")
+            return QuoteResult(False, order, amount_raw, out, impact, len(route), latency_ms, "quote_impact", fetched_at)
         self._qstats["ok"] += 1
-        return QuoteResult(True, order, amount_raw, out, impact, len(route), latency_ms, "ok")
+        return QuoteResult(True, order, amount_raw, out, impact, len(route), latency_ms, "ok", fetched_at)
 
     async def quote(
         self,
         mint: str,
         amount_raw: int,
         liquidity_usd: float = 0.0,
+        force: bool = False,
     ) -> Optional[QuoteResult]:
         """Verify tradability for ``mint`` and return a ready-to-execute order.
 
         Chooses slippage from ``liquidity_usd`` tiers, retries "no route"
         briefly (new launches race their liquidity), and caches the result
         briefly to collapse simultaneous evaluations of the same token.
+        ``force=True`` bypasses the cache (used when a cached quote is stale).
         """
         slippage = self._qcfg.slippage_for(max(liquidity_usd, 0.0))
         key = (mint, amount_raw, slippage)
 
-        now = time.monotonic()
-        cached = self._quote_cache.get(key)
-        if cached and now - cached[0] < self._qcfg.cache_ttl_sec:
-            return cached[1]
+        if not force:
+            now = time.monotonic()
+            cached = self._quote_cache.get(key)
+            if cached and now - cached[0] < self._qcfg.cache_ttl_sec:
+                return cached[1]
 
         result: Optional[QuoteResult] = None
         for attempt in range(max(self._qcfg.retries, 1)):
