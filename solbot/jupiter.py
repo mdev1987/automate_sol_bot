@@ -27,6 +27,7 @@ import asyncio
 import base64
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional
 
@@ -40,6 +41,9 @@ log = logging.getLogger(__name__)
 
 # Slippage escalation ladder when a sell keeps failing (basis points).
 SELL_SLIPPAGE_ESCALATION = (200, 300, 500, 1000)
+
+# Recent-latency samples kept for p50/p95 percentiles in quote_summary().
+_LATENCY_SAMPLES_MAX = 500
 
 
 class JupiterError(RuntimeError):
@@ -136,6 +140,7 @@ class JupiterSwap:
         self._lat_sum = 0.0
         self._lat_count = 0
         self._lat_max = 0.0
+        self._lat_samples: deque = deque(maxlen=_LATENCY_SAMPLES_MAX)
 
     async def close(self) -> None:
         """Release the underlying HTTP client."""
@@ -147,9 +152,10 @@ class JupiterSwap:
         return self._keypair is not None
 
     def quote_summary(self) -> str:
-        """One-line quote-gate + latency summary."""
+        """One-line quote-gate + latency summary (avg/max/p50/p95)."""
         q = self._qstats
         avg = self._lat_sum / self._lat_count if self._lat_count else 0.0
+        p50, p95 = self._latency_percentiles()
         return (
             f"quotes quotes={q['quotes']} ok={q['ok']} "
             f"no_route={q['quote_no_route']} impact={q['quote_impact']} "
@@ -157,8 +163,19 @@ class JupiterSwap:
             f"invalid={q['quote_invalid_response']} "
             f"no_funds={q['quote_insufficient_funds']} "
             f"rate_limit={q['quote_rate_limited']} exc={q['quote_exception']} "
-            f"latency avg={avg:.0f}ms max={self._lat_max:.0f}ms"
+            f"latency avg={avg:.0f}ms max={self._lat_max:.0f}ms "
+            f"p50={p50:.0f}ms p95={p95:.0f}ms"
         )
+
+    def _latency_percentiles(self) -> tuple[float, float]:
+        """p50/p95 of recent quote latencies (0,0 when no samples yet)."""
+        if not self._lat_samples:
+            return 0.0, 0.0
+        samples = sorted(self._lat_samples)
+        n = len(samples)
+        p50 = samples[(n - 1) * 50 // 100]
+        p95 = samples[(n - 1) * 95 // 100]
+        return float(p50), float(p95)
 
     # ------------------------------------------------------------------- order
     async def _order(
@@ -262,6 +279,7 @@ class JupiterSwap:
         self._lat_sum += ms
         self._lat_count += 1
         self._lat_max = max(self._lat_max, ms)
+        self._lat_samples.append(ms)
 
     def _classify_error(self, exc: JupiterError) -> str:
         """Map a Jupiter order failure to a skip-taxonomy reason."""

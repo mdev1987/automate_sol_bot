@@ -48,8 +48,7 @@ class ScannerThresholds:
     max_pending_evaluations: int = 500     # bounded pending queue (drop oldest)
     max_evaluation_workers: int = 25       # concurrent evaluations
     max_scan_window_sec: int = 30          # best-effort DexScreener wait
-    # NOTE: no min_score here — the score does NOT gate entry. It is only
-    # used to rank qualified tokens and pick the best when several qualify.
+    min_signal_score: float = 50.0         # signals below this score are dropped
 
 
 @dataclass(frozen=True)
@@ -254,6 +253,7 @@ def load_settings() -> Settings:
             max_pending_evaluations=_env_int("MAX_PENDING_EVALUATIONS", ScannerThresholds.max_pending_evaluations),
             max_evaluation_workers=_env_int("MAX_EVALUATION_WORKERS", ScannerThresholds.max_evaluation_workers),
             max_scan_window_sec=_env_int("MAX_SCAN_WINDOW_SEC", ScannerThresholds.max_scan_window_sec),
+            min_signal_score=_env_float("MIN_SIGNAL_SCORE", ScannerThresholds.min_signal_score),
         ),
         exit=ExitConfig(
             take_profit_mult=_env_float("TAKE_PROFIT_MULT", ExitConfig.take_profit_mult),

@@ -162,6 +162,8 @@ class HealthMonitor:
         trader: Trader,
         journal: TradeJournal,
         *,
+        scanner: Optional["Scanner"] = None,
+        jupiter: Optional["JupiterSwap"] = None,
         health_check_sec: float = _HEALTH_CHECK_SEC,
         idle_alert_sec: float = _STREAM_IDLE_ALERT_SEC,
         summary_interval_sec: float = _SUMMARY_INTERVAL_SEC,
@@ -170,6 +172,8 @@ class HealthMonitor:
         self._stream = stream
         self._trader = trader
         self._journal = journal
+        self._scanner = scanner
+        self._jupiter = jupiter
         self._health_check = health_check_sec
         self._idle_alert = idle_alert_sec
         self._summary_interval = summary_interval_sec
@@ -198,7 +202,10 @@ class HealthMonitor:
             # 2) Persist runtime state (crash recovery).
             await self._journal.save_state(self._trader)
 
-            # 3) Periodic summary card.
+            # 3) Periodic summary card + merged funnel log line.
             if time.monotonic() - self._last_summary >= self._summary_interval:
                 self._last_summary = time.monotonic()
                 await self._reporter.send_status(**self._trader.summary())
+                plc = self._scanner.counters_summary() if self._scanner else "funnel n/a"
+                qlc = self._jupiter.quote_summary() if self._jupiter else "quotes n/a"
+                log.info("%s | %s | %s", plc, qlc, self._trader.skip_summary())

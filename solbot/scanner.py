@@ -5,10 +5,10 @@ The scanner turns raw PumpDev launch frames into qualified buy signals:
     create frame -> (best-effort DexScreener pair) -> filter ->
     rug-check -> score -> emit Signal
 
-DexScreener is a **required** source for a signal: we wait a short, bounded
-``max_scan_window_sec`` (default 30s) for a pair; if none appears the
-candidate is skipped. A token with no indexed pair has no market data to
-trade on, so it is never scored or emitted as a signal. A bounded pending
+DexScreener is a **supplemental** source, not the gate. We wait a short,
+bounded ``max_scan_window_sec`` (default 30s) for a pair; if none appears
+the candidate still goes forward to the score gate and Jupiter quote-gate,
+which — not DexScreener — is the authority on tradability. A bounded pending
 queue feeds a fixed worker pool so memory and concurrency stay
 deterministic under launch bursts.
 """
@@ -67,7 +67,7 @@ class Scanner:
         # Funnel counters: where candidates go before becoming a signal.
         self._stats: dict[str, int] = {
             "events": 0, "stale": 0, "dropped": 0, "no_pair": 0,
-            "filtered": 0, "rug_blocked": 0, "signals": 0,
+            "filtered": 0, "score_low": 0, "rug_blocked": 0, "signals": 0,
         }
         self._next_report = time.monotonic() + FUNNEL_REPORT_SEC
 
@@ -80,8 +80,8 @@ class Scanner:
         return (
             f"funnel events={s['events']} stale={s['stale']} "
             f"dropped={s['dropped']} no_pair={s['no_pair']} "
-            f"filtered={s['filtered']} rug_blocked={s['rug_blocked']} "
-            f"signals={s['signals']}"
+            f"filtered={s['filtered']} score_low={s['score_low']} "
+            f"rug_blocked={s['rug_blocked']} signals={s['signals']}"
         )
 
     # ------------------------------------------------------------------ run
@@ -150,15 +150,14 @@ class Scanner:
 
     # ------------------------------------------------------------ evaluation
     async def _evaluate(self, create: dict) -> Optional[Signal]:
-        """Evaluate one candidate; a DexScreener pair is required."""
+        """Evaluate one candidate; a missing DexScreener pair is not fatal."""
         pair = await self._pair_liquidity(create.get("mint", ""))
         if pair is None:
             self._bump("no_pair")
             log.info("NO_PAIR %s: no DexScreener pair in %.0fs — "
-                     "skipped (pair required)",
+                     "proceeding to quote-gate (pair optional)",
                      create.get("symbol"),
                      self._thresholds.max_scan_window_sec)
-            return None
         signal = self._qualify(create, pair)
         if signal is not None and self._out_queue is not None:
             await self._out_queue.put(signal)
@@ -207,6 +206,11 @@ class Scanner:
             dev_sol=dev_sol,
             liquidity_usd=pair.liquidity_usd if pair else 0.0,
         )
+        if s.total < self._thresholds.min_signal_score:
+            self._bump("score_low")
+            log.info("LOW_SCORE %s (%s): score=%.1f < %.0f",
+                     symbol, mint, s.total, self._thresholds.min_signal_score)
+            return None
         self._bump("signals")
         log.info("QUALIFIED %s (%s) score=%.1f pair=%s",
                  symbol, mint, s.total, "yes" if pair else "none")

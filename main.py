@@ -59,7 +59,10 @@ class Bot:
         )
         self.trader.restore_state(self.journal.load_state())
 
-        self.health = HealthMonitor(self.reporter, self.stream, self.trader, self.journal)
+        self.health = HealthMonitor(
+            self.reporter, self.stream, self.trader, self.journal,
+            scanner=self.scanner, jupiter=self.jupiter,
+        )
         self.events_q: asyncio.Queue = asyncio.Queue()
         self.signals_q: asyncio.Queue = asyncio.Queue()
 

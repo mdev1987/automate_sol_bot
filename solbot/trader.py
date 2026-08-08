@@ -597,4 +597,5 @@ class Trader:
             "balance_usdc": self.balance_usd,
             "exit_counts": s.exit_counts,
             "skips": self.skip_summary(),
+            "quotes": self._jupiter.quote_summary() if self._jupiter else "",
         }
